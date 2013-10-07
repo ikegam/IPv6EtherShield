@@ -21,7 +21,6 @@
 */
 
 extern "C" {
-	#include "enc28j60.h"
 	#include "uip.h"
 	#include "uip-netif.h"
 	#include "uip-nd6.h"
@@ -32,6 +31,12 @@ extern "C" {
 #include "Arduino.h"
 #include "IPv6EtherShield.h"
 #include "arduino-debug.h"
+
+#include <SPI.h>         // needed for Ethernet library communication with the W5100 (Arduino ver>0018)
+#include <Ethernet.h>
+#include <utility/w5100.h>
+
+#define ARDUINO_DEBUG 1
 
 struct ethip_hdr {
   struct uip_eth_hdr ethhdr;
@@ -46,6 +51,8 @@ struct ethip_hdr {
   u16_t ipchksum;
   uip_ipaddr_t srcipaddr, destipaddr;
 };
+
+SOCKET s; // our socket that will be opened in RAW mode
 
 #define BUF ((struct uip_eth_hdr *)&uip_buf[0])
 #define IPBUF ((struct ethip_hdr *)&uip_buf[0])
@@ -64,30 +71,12 @@ IPv6EtherShield::IPv6EtherShield(){
 void IPv6EtherShield::initENC28J60(uint8_t* macAddress){
     uint8_t counter;
 
-    enc28j60Init(macAddress);
+    W5100.init();
+    W5100.writeSnMR(s, SnMR::MACRAW);
+    W5100.execCmdSn(s, Sock_OPEN);
 
-    enc28j60clkout(2); // change clkout from 6.25MHz to 12.5MHz
-
+    //enc28j60clkout(2); // change clkout from 6.25MHz to 12.5MHz
     delay (10);
-
-    // 6 times for IPv6 ;-)
-    for (counter=0; counter<6; counter++) {
-
-        /* Magjack leds configuration, see enc28j60 datasheet, page 11 */
-        // LEDA=green LEDB=yellow
-
-        // 0x880 is PHLCON LEDB=on, LEDA=on
-        enc28j60PhyWrite (PHLCON, 0x880);
-        delay (100);
-
-        // 0x990 is PHLCON LEDB=off, LEDA=off
-        enc28j60PhyWrite (PHLCON, 0x990);
-        delay (100);
-    }    
-
-    // 0x476 is PHLCON LEDA=links status, LEDB=receive/transmit
-    enc28j60PhyWrite (PHLCON, 0x476);
-    delay (100);
 }
 
 uint8_t ethOutput(uip_lladdr_t *lladdr) {
@@ -106,10 +95,10 @@ uint8_t ethOutput(uip_lladdr_t *lladdr) {
     memcpy(&BUF->src, &uip_lladdr, UIP_LLADDR_LEN);
     BUF->type = HTONS(UIP_ETHTYPE_IPV6);
     uip_len += sizeof(struct uip_eth_hdr);
- 
+
     /* Pass the frame to the ethernet driver */
-    // return enc28j60_frame_send(uip_len, (char *)uip_buf);
-    enc28j60PacketSend(uip_len, uip_buf);
+    W5100.send_data_processing(s, uip_buf, uip_len);
+    W5100.execCmdSn(s, Sock_SEND_MAC);
     return 0;
 }
 
@@ -139,8 +128,17 @@ void IPv6EtherShield::addAddress(uint16_t addr0, uint16_t addr1, uint16_t addr2,
     uip_nd6_prefix_add(&ipv6_address, 64, 0);
 }
 
+byte RXbuf[1980];
+
 void IPv6EtherShield::receivePacket() {
-    uip_len = enc28j60PacketReceive(UIP_BUFSIZE, uip_buf);
+  byte* buf = RXbuf;
+    uip_len = W5100.getRXReceivedSize(s);
+    if (uip_len > 0) {
+      W5100.recv_data_processing(s, buf, uip_len);
+      W5100.execCmdSn(s, Sock_RECV);
+      buf+=2;
+      memcpy(uip_buf, buf, uip_len);
+    }
 }
 
 uint8_t IPv6EtherShield::isIPv6Packet() {
